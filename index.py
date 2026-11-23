@@ -11,6 +11,7 @@ server.py's add_document tool imports chunk_file() and embed_and_store().
 """
 
 import hashlib
+import math
 import re
 import sys
 import time
@@ -61,8 +62,9 @@ def clean(text: str) -> str:
 def location_of(title: str) -> str:
     """'Artículo 23' / 'Disposición adicional primera' / 'Anexo' from a BOE block title."""
     title = clean(title or "")
-    m = re.match(r"(Artículo \d+(?: (?:bis|ter|quater))?)", title, re.I)
-    return m.group(1) if m else title
+    # The BOE sometimes drops the accent ("Articulo 33"), so accept both spellings
+    m = re.match(r"Art[íi]culo (\d+(?: (?:bis|ter|quater))?)", title, re.I)
+    return f"Artículo {m.group(1)}" if m else title
 
 
 def parse_boe(path: Path) -> list[dict]:
@@ -235,6 +237,73 @@ def embed_and_store(chunks: list[dict], design: str = "article") -> int:
     return len(todo)
 
 
+# ---------------------------------------------------------------------------
+# Search (used by server.py and evaluate.py)
+# ---------------------------------------------------------------------------
+STOPWORDS = set("""de la el en y a los las del que se por un una con para al lo su sus o como es son
+                 no si sin sobre entre este esta estos estas ese esa ser ha han le les más mas cual
+                 qué que cuál cuándo cómo puede pueden debe deben""".split())
+
+
+def tokens(text: str) -> list[str]:
+    text = unicodedata.normalize("NFKD", text.lower())
+    text = "".join(ch for ch in text if not unicodedata.combining(ch))  # "dopaje" == "dopáje"
+    return [w for w in re.findall(r"[a-z0-9]+", text) if len(w) > 2 and w not in STOPWORDS]
+
+
+_bm25 = {}
+
+
+def bm25_scores(query: str, design: str) -> dict:
+    """Keyword relevance (BM25) of every stored chunk for the query: {chunk id: score}."""
+    if design not in _bm25:
+        got = collection(design).get(include=["documents"])
+        docs = [tokens(d) for d in got["documents"]]
+        df = {}
+        for d in docs:
+            for w in set(d):
+                df[w] = df.get(w, 0) + 1
+        _bm25[design] = (got["ids"], docs, df, sum(map(len, docs)) / max(len(docs), 1))
+    ids, docs, df, avg = _bm25[design]
+    n, k1, b, scores = len(docs), 1.5, 0.75, {}
+    q = set(tokens(query))
+    for i, d in zip(ids, docs):
+        tf = {}
+        for w in d:
+            if w in q:
+                tf[w] = tf.get(w, 0) + 1
+        score = sum(math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5)) * f * (k1 + 1) / (f + k1 * (1 - b + b * len(d) / avg))
+                    for w, f in tf.items())
+        if score:
+            scores[i] = score
+    return scores
+
+
+def search(query: str, design: str = "article", k: int = 5, hybrid: bool = True,
+           query_vector: list[float] | None = None) -> list[dict]:
+    """Top-k chunks for a query: [{source, location, articles, text, rank}].
+
+    Vector search alone, or hybrid: vector and keyword (BM25) rankings merged
+    with reciprocal rank fusion, so exact legal terms count as much as meaning.
+    """
+    col = collection(design)
+    vector = query_vector or embed_query(query)
+    pool = 50 if hybrid else k
+    got = col.query(query_embeddings=[vector], n_results=min(pool, col.count()), include=["documents", "metadatas"])
+    found = {i: {"text": d, **m} for i, d, m in zip(got["ids"][0], got["documents"][0], got["metadatas"][0])}
+    fused = {i: 1 / (60 + r) for r, i in enumerate(got["ids"][0], 1)}
+    if hybrid:
+        keyword = sorted(bm25_scores(query, design).items(), key=lambda x: -x[1])[:pool]
+        for r, (i, _) in enumerate(keyword, 1):
+            fused[i] = fused.get(i, 0) + 1 / (60 + r)
+        missing = [i for i, _ in keyword if i not in found]
+        if missing:
+            extra = col.get(ids=missing, include=["documents", "metadatas"])
+            found.update({i: {"text": d, **m} for i, d, m in zip(extra["ids"], extra["documents"], extra["metadatas"])})
+    ranked = sorted(fused, key=lambda i: -fused[i])[:k]
+    return [{**found[i], "rank": r} for r, i in enumerate(ranked, 1)]
+
+
 def download() -> list[Path]:
     CORPUS.mkdir(exist_ok=True)
     paths = []
@@ -255,5 +324,13 @@ if __name__ == "__main__":
         chunks = [c for p in paths for c in chunk_file(p, design)]
         words = sum(c["words"] for c in chunks)
         log(f"[{design}] {len(chunks)} chunks, {words:,} words, {len(set(c['source'] for c in chunks))} documents")
+        # Drop stored chunks of these laws that the current chunking no longer produces
+        col = collection(design)
+        current = {c["id"] for c in chunks}
+        stale = [i for i, m in zip(*map(col.get(where={"source": {"$in": list(LAWS.values())}}, include=["metadatas"]).get,
+                                      ("ids", "metadatas"))) if i not in current]
+        if stale:
+            col.delete(ids=stale)
+            log(f"[{design}] removed {len(stale)} outdated chunks")
         new = embed_and_store(chunks, design)
         log(f"[{design}] embedded {new} new chunks; collection now holds {collection(design).count()}")
