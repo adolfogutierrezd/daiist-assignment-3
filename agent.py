@@ -32,7 +32,7 @@ from mcp.client.stdio import stdio_client
 from api_key import load_api_key
 
 ROOT = Path(__file__).resolve().parent
-MODEL, FALLBACK = "gemini-3-flash-preview", "gemini-3.5-flash"
+MODEL, FALLBACK = "gemini-3.5-flash-lite", "gemini-flash-lite-latest"  # free tier: the "flash" models allow only 20 requests a day
 MAX_SEARCHES, MAX_MODEL_CALLS = 4, 8
 REFUSAL = "Las leyes consultadas no cubren esta pregunta."
 
