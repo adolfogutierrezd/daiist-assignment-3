@@ -218,9 +218,14 @@ def embed_query(text: str) -> list[float]:
     return embed([text], "RETRIEVAL_QUERY")[0]
 
 
+_db = None
+
+
 def collection(design: str = "article"):
-    db = chromadb.PersistentClient(path=str(INDEX))
-    return db.get_or_create_collection(f"sports_law_{design}", metadata={"hnsw:space": "cosine"})
+    global _db
+    if _db is None:  # no telemetry: nothing may write to stdout, which MCP uses
+        _db = chromadb.PersistentClient(path=str(INDEX), settings=chromadb.Settings(anonymized_telemetry=False))
+    return _db.get_or_create_collection(f"sports_law_{design}", metadata={"hnsw:space": "cosine"})
 
 
 def embed_and_store(chunks: list[dict], design: str = "article") -> int:
