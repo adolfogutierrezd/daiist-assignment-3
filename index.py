@@ -74,7 +74,8 @@ def parse_boe(path: Path) -> list[dict]:
     signatures, the initial note and the BOE's editorial notes about amendments,
     which are comments on the law, not the law itself.
     """
-    source = LAWS.get(path.stem, path.stem)
+    # File names can't contain "/", so "RD 958_2020 ..." is cited as "RD 958/2020 ..."
+    source = LAWS.get(path.stem) or re.sub(r"(\d+)_(\d{4})", r"\1/\2", path.stem)
     root = ET.parse(path).getroot()
     articles, titulo, capitulo = [], "", ""
     for block in root.iter("bloque"):

@@ -72,7 +72,13 @@ def citations(answer: str) -> list[tuple[str, str]]:
     out = []
     for law, place in re.findall(r"\(([^(),]+?),\s*([^()]+?)\)", answer):
         if re.search(r"\d+/\d{4}|real decreto|reglamento", law, re.I):
-            out.append((_law_key(law), _place_key(place)))
+            # "Artículos 6 y 7" / "Artículos 21 y 24.5" cite several articles at once
+            many = re.match(r"art[íi]culos\s+(.+)", place.strip(), re.I)
+            if many:
+                for number in re.findall(r"\d+", re.sub(r"\.\d+", "", many.group(1))):
+                    out.append((_law_key(law), f"articulo {number}"))
+            else:
+                out.append((_law_key(law), _place_key(place)))
     return out
 
 
